@@ -1,0 +1,577 @@
+---
+title: "Racial diversity analysis of TCR sequencing data"
+author: "Maia Bennett-Boehm"
+date: "12/11/2023"
+output: html_document
+---
+
+This document contains the code utilized to conduct a basic analysis of race information in three publicly available TCR-pMHC (T cell receptor-peptide-major histocompatibility complex) binding datasets.
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+```
+
+Library:
+
+```{r library, }
+
+library(readxl)
+library(ggplot2)
+library(plyr)
+library(tidyverse)
+library(ggpubr)
+library(rstatix)
+library(patchwork)
+
+```
+
+## Data import
+
+This section imports TCR-pMHC binding data from 3 major, publicly available datasets: ImmuneCODE, McPAS, and VDJdb. These sources were selected due to their established use in prior publications coupled with their (mostly) separate sources of data, indicating that there should be minimal overlaps in data coverage. 
+
+
+```{r import}
+
+# File names: change as needed to indicate file locations
+immuneCODE.subjects.file <- "C:/Users/Me/OneDrive - University of Nebraska at Omaha/Thesis/Datasets/ImmuneCODE/ImmuneCODE-MIRA-Release002/subject-metadata.csv"
+immuneCODE.minigene.file <- "C:/Users/Me/OneDrive - University of Nebraska at Omaha/Thesis/Datasets/ImmuneCODE/ImmuneCODE-MIRA-Release002/minigene-detail.csv"
+immuneCODE.peptide.file <- "C:/Users/Me/OneDrive - University of Nebraska at Omaha/Thesis/Datasets/ImmuneCODE/ImmuneCODE-MIRA-Release002/peptide-detail.csv"
+tcrdb.dir <- "C:/Users/Me/OneDrive - University of Nebraska at Omaha/Thesis/Datasets/TCRdb/"
+tcrdb.files <- list.files(path = tcrdb.dir, pattern = ".tsv", full.names = TRUE)
+mcpas.file <- "C:/Users/Me/OneDrive - University of Nebraska at Omaha/Thesis/Datasets/McPAS-TCR.csv"
+vdjdb.file <- "C:/Users/Me/OneDrive - University of Nebraska at Omaha/Thesis/Datasets/VDJdb/vdjdb.slim.txt"
+
+
+# ImmunoCODE import
+immuneCODE.subjects <- read.csv(immuneCODE.subjects.file)
+immuneCODE.minigene <- read.csv(immuneCODE.minigene.file)
+immuneCODE.peptide <- read.csv(immuneCODE.peptide.file)
+
+# Merge race/ethnicity entries with same indication (Black or African American and African American)
+immuneCODE.subjects$Race[immuneCODE.subjects$Race == "African American"] <- "Black or African American"
+
+# Make column to indicate data availability by donor, experiment
+immuneCODE.subjects$Availability <- ifelse(immuneCODE.subjects$Race=="N/A", "Not available", "Available")
+
+# Join all metadata and sequence data 
+immuneCODE.minigene <- inner_join(immuneCODE.subjects, immuneCODE.minigene, by="Experiment")
+immuneCODE.peptide <- inner_join(immuneCODE.subjects, immuneCODE.peptide, by="Experiment")
+colnames(immuneCODE.peptide)[colnames(immuneCODE.peptide) == 'Amino.Acids'] <- "Amino.Acid"
+immuneCODE.full <- rbind(select(immuneCODE.minigene, Experiment, Subject, Race, Availability, TCR.BioIdentity, HLA.A, HLA.B, HLA.C, Amino.Acid), select(immuneCODE.peptide, Experiment, Subject, Race, Availability, TCR.BioIdentity, HLA.A, HLA.B, HLA.C, Amino.Acid))
+
+# Although source material indicates all TCR-pMHC entries are unique, check anyway; a small portion is removed
+immuneCODE.full <- immuneCODE.full[!duplicated(immuneCODE.full[, c('TCR.BioIdentity', 'Amino.Acid', 'Subject')]), ]
+
+
+
+
+# TCRdb import
+# As TCRdb stores data by study, individual files are read in, aggregated, and duplicates removed 
+# Because it was not possible to detect redundant data without CDR loop information, TCRdb was removed from analysis
+#tcrdb <- read.delim(tcrdb.files[1])
+#for(i in 2:length(tcrdb.files)){
+#  tcrdb.temp <- read.delim(tcrdb.files[i])
+#  tcrdb <- rbind(tcrdb, tcrdb.temp)
+#}
+
+# Remove any duplicate entries between studies
+#tcrdb <- tcrdb[!duplicated(tcrdb[c('RunId', 'AASeq', 'Vregion', 'Dregion', 'Jregion')]), ]
+
+
+# McPAS import
+mcpas<- read.csv(mcpas.file)
+
+# Remove non-human entries
+mcpas <- mcpas[mcpas$Species == 'Human', ]
+
+
+# VDJdb import
+vdjdb <- read.delim(vdjdb.file)
+
+# Remove non-human entries
+vdjdb <- vdjdb[vdjdb$species == 'HomoSapiens', ]
+
+
+# Preliminary data filtering for redundancy
+# Combine all data for data coverage analysis; retain CDR3, peptide
+# Start with immune code
+full <- immuneCODE.full[ , c('TCR.BioIdentity', 'Amino.Acid', 'Race', 'Availability')]
+
+# Remove gene family information (located after '+' in field) for TCR.Bioidentity to get CDR3 sequence
+full$TCR.BioIdentity <- gsub("\\+.*", "", full$TCR.BioIdentity)
+colnames(full) <- c("CDR3", "Peptide", "Race", "Availability")
+
+# Add data source signifier
+full$Source <- "ImmuneCODE"
+
+# Add VDJ
+vdjdb.add <- data.frame(select(vdjdb, 'cdr3', 'antigen.epitope'), "VDJdb", "N/A", "Not available")
+colnames(vdjdb.add) <- c("CDR3", "Peptide", "Source", "Race", "Availability")
+full <- rbind(full, vdjdb.add)
+
+
+# Add McPAS; because of data formatting in other datasets, break paired data into single CDR3 chains to find any redundant entries
+mcpas.add <- data.frame(select(mcpas, 'CDR3.alpha.aa', 'Epitope.peptide'), "McPAS-TCR", "N/A", "Not available")
+mcpas.add <- rbind(data.frame(select(mcpas, 'CDR3.beta.aa', 'Epitope.peptide'), "McPAS-TCR", "N/A", "Not available"))
+colnames(mcpas.add) <- c('CDR3', 'Peptide', 'Source', "Race", "Availability")
+
+# Remove n/a/ entries caused by missing peptide sequences, unpaired CDR3 sequences in original dataset
+mcpas.add <- mcpas.add[!is.na(mcpas.add$Peptide), ]
+mcpas.add <- mcpas.add[!is.na(mcpas.add$CDR3), ]
+
+# Bind to aggregated data
+full <- rbind(full, mcpas.add)
+
+
+# Check all CDR3 + peptide sequences for duplicates and remove as necessary (binding pair count)
+full$Redundant <- ifelse((!duplicated(full[, c('CDR3', 'Peptide')])), "Unique", "Redundant")
+full$RedundantTCR <- ifelse((!duplicated(full[, 'CDR3'])), "Unique", "Redundant")
+
+
+```
+
+##  Analysis: Distribution of self-reported race information
+
+This section displays various binding data parameters (number of subjects, established TCR-pMHC binding pairs ('hits'), and unique TCR bioidentities) by race/ethnicity in the ImmuneCODE dataset, the only major dataset which includes this factor. It also runs basic statistical association tests (Kruskal-Wallis) between subject race and the number of hits established per subjects. 
+
+### Establish counts
+
+```{r counts, echo=TRUE}
+
+# Get counts
+# subject count by race
+immuneCODE.subjects.unique <- immuneCODE.subjects[!duplicated(immuneCODE.subjects$Subject), ]
+immuneCODE.counts <- count(immuneCODE.subjects.unique, Race, name = "Subject")
+
+# Sample count by race
+immuneCODE.counts <- cbind(immuneCODE.counts, count(immuneCODE.full, Race)[,2])
+colnames(immuneCODE.counts)[3] <- "Binding.pairs"
+
+# Filter unique TCR bioidentity and add unique TCR count by race
+immuneCODE.TCRs.unique <- immuneCODE.full[!duplicated(immuneCODE.full$TCR.BioIdentity), ]
+immuneCODE.counts <- cbind(immuneCODE.counts, count(immuneCODE.TCRs.unique, Race)[,2])
+colnames(immuneCODE.counts)[4] <- "TCR.bioidentities"
+
+immuneCODE.counts
+
+# Sample (binding pair) count by subject with associated race
+immuneCODE.sample.counts <- count(immuneCODE.full, Subject, name = "Binding.pairs")
+immuneCODE.sample.counts <- inner_join(immuneCODE.subjects.unique[, c('Race', 'Subject')], immuneCODE.sample.counts, by = "Subject")
+
+immuneCODE.sample.counts
+
+# Create counts without n/a
+immuneCODE.counts.no.na <- immuneCODE.counts[immuneCODE.counts$Race != "N/A",]
+immuneCODE.sample.counts.no.na <- immuneCODE.sample.counts[immuneCODE.sample.counts$Race != "N/A",]
+
+```
+
+### Data visualization
+
+#### Distribution by subject
+
+``` {r subjects, echo=TRUE, fig.show="hold", out.width="50%"}
+# Plots 
+# subject counts with n/as
+ggplot(immuneCODE.counts, aes(x=Race, y=Subject)) + 
+  geom_bar(stat="identity") + 
+  coord_flip() + 
+  ggtitle("Distribution of subject race") +
+  geom_text(aes(label=Subject), hjust = -0.2)
+
+ggplot(immuneCODE.counts, aes(x="", y=Subject, fill=Race)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  coord_polar("y", start=0) +
+  theme_void() + ggtitle("Distribution of subject race") +
+  theme(legend.title=element_blank()) 
+
+# Without n/as
+ggplot(immuneCODE.counts.no.na, aes(x=Race, y=Subject)) + 
+  geom_bar(stat="identity") + 
+  coord_flip() + 
+  ggtitle("Distribution of subject race, exluding N/As") +
+  geom_text(aes(label=Subject), hjust = -0.2)
+
+ggplot(immuneCODE.counts.no.na, aes(x="", y=Subject, fill=Race)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  coord_polar("y", start=0) +
+  theme_void() + ggtitle("Distribution of subject race, excluding N/As") +
+  theme(legend.title=element_blank())
+
+```
+
+#### Distribution by binding pairs
+
+``` {r binding-pairs, echo=TRUE, fig.show="hold", out.width="50%"}
+
+# Sample counts with NAs
+ggplot(immuneCODE.counts, aes(x=Race, y=Binding.pairs)) + 
+  geom_bar(stat="identity") + 
+  coord_flip() + 
+  ggtitle("Total unique binding pairs by subject race") +
+  geom_text(aes(label=Binding.pairs), hjust = -0.2)
+
+ggplot(immuneCODE.counts, aes(x="", y=Binding.pairs, fill=Race)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  coord_polar("y", start=0) +
+  theme_void() + ggtitle("Total unique binding pairs by subject race") +
+  theme(legend.title=element_blank())
+
+# Without n/as
+ggplot(immuneCODE.counts.no.na, aes(x=Race, y=Binding.pairs)) + 
+  geom_bar(stat="identity") + 
+  coord_flip() + 
+  ggtitle("Total unique binding pairs by subject race, exclusing N/As") +
+  geom_text(aes(label=Binding.pairs), hjust = -0.2)
+
+ggplot(immuneCODE.counts.no.na, aes(x="", y=Binding.pairs, fill=Race)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  coord_polar("y", start=0) +
+  theme_void() + ggtitle("Total unique binding pairs by subject race, excluding N/As") +
+  theme(legend.title=element_blank())
+
+```
+
+#### Distribution by unique TCR bioidenties
+
+``` {r tcrs, echo=TRUE, fig.show="hold", out.width="50%"}
+
+# Unique TCR counts with NAs
+ggplot(immuneCODE.counts, aes(x=Race, y=TCR.bioidentities)) + 
+  geom_bar(stat="identity") + 
+  coord_flip() + 
+  ggtitle("Total unique TCRs by subject race") +
+  geom_text(aes(label=Subject), hjust = -0.2)
+
+ggplot(immuneCODE.counts, aes(x="", y=TCR.bioidentities, fill=Race)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  coord_polar("y", start=0) +
+  theme_void() + ggtitle("Total unique TCRs by subject race") +
+  theme(legend.title=element_blank())
+
+# Without n/as
+ggplot(immuneCODE.counts, aes(x=Race, y=TCR.bioidentities)) + 
+  geom_bar(stat="identity") + 
+  coord_flip() + 
+  ggtitle("Total unique TCRs by subject race, excluding N/As") +
+  geom_text(aes(label=Subject), hjust = -0.2)
+
+ggplot(immuneCODE.counts.no.na, aes(x="", y=TCR.bioidentities, fill=Race)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  coord_polar("y", start=0) +
+  theme_void() + ggtitle("Total number of unique TCRs by subject race, excluding N/As") +
+  theme(legend.title=element_blank())
+
+```
+
+#### Data per subject
+
+``` {r coverage, echo=TRUE, fig.show="hold", out.width="50%"}
+
+# Race and binding pairs per subject histogram, with N/As
+ggplot(immuneCODE.sample.counts.no.na, aes(x=Binding.pairs, fill = as.factor(Race))) +
+  geom_density(alpha = 0.2) +
+  theme(legend.title=element_blank()) +
+  ggtitle("Total number of binding pairs per subject, by self-reported race")
+
+# Experiments per donor
+ggplot(immuneCODE.subjects, aes(x=as.character(Subject))) + 
+  geom_bar(stat="count", aes(fill=factor(Race))) + 
+  
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), legend.title=element_blank()) + 
+  labs(title="Number of experiments per subject",
+        x ="Subject", y = "Experiment count")
+
+# Race and binding pairs per subject histogram, no N/As
+ggplot(immuneCODE.sample.counts.no.na, aes(x=Binding.pairs, fill = as.factor(Race))) +
+  geom_density(alpha = 0.2) +
+  theme(legend.title=element_blank()) +
+  ggtitle("Total number of binding pairs per subject, by self-reported race, excluding N/As")
+
+# Experiments per donor
+ggplot(immuneCODE.subjects[immuneCODE.subjects$Race != "N/A", ], aes(x=as.character(Subject))) + 
+  geom_bar(stat="count", aes(fill=factor(Race))) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), legend.title=element_blank()) + 
+  labs(title="Number of experiments per subject, excluding N/As",
+        x ="Subject", y = "Experiment count")
+
+```
+
+#### Statistics
+
+``` {r stats, echo=TRUE, fig.show="hold", out.width="50%"}
+# Statistical association by Kruskal-Wallis test, with N/As
+# Stats and box plot
+immuneCODE.stats <- get_summary_stats(group_by(immuneCODE.sample.counts, Race))
+immuneCODE.stats
+
+ggboxplot(immuneCODE.sample.counts, x = "Race", y = "Binding.pairs") + 
+  ggtitle("Total number of binding pairs per subject, by self-reported race") + 
+  scale_x_discrete(guide = guide_axis(n.dodge = 2)) 
+
+
+immuneCODE.stats.kruskal <- kruskal.test(Binding.pairs ~ Race, data = immuneCODE.sample.counts)
+immuneCODE.stats.kruskal # Not significant
+
+
+# Statistical association by Kruskal-Wallis test, no N/As
+# Stats and box plot
+immuneCODE.stats <- get_summary_stats(group_by(immuneCODE.sample.counts.no.na, Race))
+immuneCODE.stats
+
+ggboxplot(immuneCODE.sample.counts.no.na, x = "Race", y = "Binding.pairs") + 
+  ggtitle("Total number of binding pairs by subject race, excluding N/As") + 
+  scale_x_discrete(guide = guide_axis(n.dodge = 2)) 
+
+immuneCODE.stats.kruskal <- kruskal.test(Binding.pairs ~ Race, data = immuneCODE.sample.counts.no.na)
+immuneCODE.stats.kruskal # Not significant
+
+
+```
+
+## Race information availability analysis
+
+This section displays the contribution of each dataset to the overall number of TCR repertoire data available, as well as the distribution of samples with and without associated subject race information.
+
+### ImmuneCODE race information availability
+
+#### Availability by subject
+
+```{r iavail-subjects, echo=TRUE, fig.show="hold", out.width="50%"}
+
+# Distribution of available/unavailable in ImmuneCODE
+immuneCODE.avail <- data.frame("Race.data.availability" = c("Available", "Not available"), 
+                                     "subjects" = c(nrow(immuneCODE.subjects.unique[immuneCODE.subjects.unique$Race != "N/A", ]), 
+                                                  (nrow(immuneCODE.subjects.unique[immuneCODE.subjects.unique$Race == "N/A", ]))),
+                                     "Binding.pairs" = c(nrow(immuneCODE.full[immuneCODE.full$Race != "N/A", ]), 
+                                                        (nrow(immuneCODE.full[immuneCODE.full$Race == "N/A", ]))), 
+                                     "TCR.bioidentities" = c(nrow(immuneCODE.TCRs.unique[immuneCODE.TCRs.unique$Race != "N/A", ]),
+                                                             (nrow(immuneCODE.TCRs.unique[immuneCODE.TCRs.unique$Race == "N/A", ]))))
+
+# By donor
+ggplot(immuneCODE.avail, aes(x=Race.data.availability, y=subjects)) + 
+  geom_bar(stat="identity") + 
+  coord_flip() + 
+  ggtitle("Availability of subject race information (ImmuneCODE)") +
+  geom_text(aes(label=subjects), hjust = -0.2)
+
+ggplot(immuneCODE.avail, aes(x="", y=subjects, fill=Race.data.availability)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  coord_polar("y", start=0) +
+  scale_fill_brewer(palette = "Pastel1") +
+  theme_void() + ggtitle("Availability of subject race information (ImmuneCODE)") +
+  theme(legend.title=element_blank())
+
+```
+
+#### Availability by binding pairs
+
+``` {r avail-binding-pairs, echo=TRUE, fig.show="hold", out.width="50%"}
+
+# By binding pair
+ggplot(immuneCODE.avail, aes(x=Race.data.availability, y=Binding.pairs)) + 
+  geom_bar(stat="identity") + 
+  coord_flip() + 
+  ggtitle("Availability of subject race information by binding pairs (ImmuneCODE)") +
+  geom_text(aes(label=Binding.pairs), hjust = 1.5)
+
+ggplot(immuneCODE.avail, aes(x="", y=Binding.pairs, fill=Race.data.availability)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  coord_polar("y", start=0) +
+  scale_fill_brewer(palette = "Pastel1") +
+  theme_void() + ggtitle("Availability of subject race information by binding pairs (ImmuneCODE)") +
+  theme(legend.title=element_blank())
+
+```
+
+#### Availability by unique TCR bioidentities
+
+``` {r avail-tcrs, echo=TRUE, fig.show="hold", out.width="50%"}
+
+# By unique TCR
+ggplot(immuneCODE.avail, aes(x=Race.data.availability, y=TCR.bioidentities)) + 
+  geom_bar(stat="identity") + 
+  coord_flip() + 
+  ggtitle("Availability of subject race information by unique TCRs (ImmuneCODE)") +
+  geom_text(aes(label=TCR.bioidentities), hjust = 1.5)
+
+ggplot(immuneCODE.avail, aes(x="", y=TCR.bioidentities, fill=Race.data.availability)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  scale_fill_brewer(palette = "Pastel1") +
+  coord_polar("y", start=0) +
+  theme_void() + ggtitle("Availability of subject race information by unique TCRs (ImmuneCODE)") +
+  theme(legend.title=element_blank())
+
+```
+
+#### Data per subject
+
+``` {r avail-coverage, echo=TRUE, fig.show="hold", out.width="50%"}
+
+# Get counts per subject
+avail.counts <- immuneCODE.sample.counts
+avail.counts$Race[avail.counts$Race != "N/A"] <- "Available"
+avail.counts$Race[avail.counts$Race == "N/A"] <- "Not available"
+
+# Histogram of binding pairs
+ggplot(avail.counts, aes(x=Binding.pairs, fill = as.factor(Race))) +
+  geom_density(alpha = 0.2) +
+  theme(legend.title=element_blank()) +
+  ggtitle("Distribution of subject binding pair counts by race information availability") 
+
+# Experiments per donor
+ggplot(immuneCODE.subjects, aes(x=as.character(Subject))) + 
+  geom_bar(stat="count", aes(fill=factor(Availability))) + 
+  scale_fill_brewer(palette = "Pastel1") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), legend.title=element_blank()) + 
+  labs(title="Number of experiments per subject",
+        x ="Subject", y = "Experiment count")
+
+```
+
+#### Statistics
+
+``` {r avail-stats, echo=TRUE, fig.show="hold", out.width="50%"}
+
+# Statistical association of binding pairs and data availability by Mann-Whitney test 
+# Get stats and run test
+avail.stats <- get_summary_stats(group_by(avail.counts, Race))
+avail.stats 
+
+
+ggboxplot(avail.counts, x = "Race", y = "Binding.pairs") + 
+  ggtitle("Total number of subject binding pairs by race information availability") + 
+  scale_x_discrete(guide = guide_axis(n.dodge = 2)) 
+
+avail.stats.mann <- wilcox.test(Binding.pairs ~ Race, data=avail.counts, paired=FALSE, exact=FALSE, conf.int=TRUE)
+avail.stats.mann
+
+ggboxplot(avail.counts, x = "Race", y = "Binding.pairs") + 
+  stat_compare_means() +
+  ggtitle("Total number of subject binding pairs by race information availability") + 
+  scale_x_discrete(guide = guide_axis(n.dodge = 2)) 
+
+```
+
+### Aggregated TCR repertoire data
+
+### Establish counts
+
+Because some ImmuneCODE binding pairs are redundant in other datasets (but have already been filtered out within the ImmuneCODE dataframe), and only ImmuneCODE entries have associated race information, count binding pairs with available race information as:
+
+(number of unique binding pairs with race information) + (number of redundant binding pairs with race information)
+
+
+``` {r agg-avail-counts, echo=TRUE}
+# Distribution of samples in each dataset
+all.samples.count <- data.frame("Dataset" = c("ImmuneCODE", 
+                                              #"TCRdb", 
+                                              "McPAS", 
+                                              "VDJdb"), 
+                                "Total.dataset.size" = c(nrow(full[full$Source == "ImmuneCODE", ]), 
+                                                         nrow(full[full$Source == "McPAS-TCR", ]), 
+                                                         nrow(full[full$Source == "VDJdb", ])),
+                                "Unique.binding.pairs" = c(nrow(full[(full$Source == "ImmuneCODE" & full$Redundant == "Unique"), ]),
+                                                           nrow(full[(full$Source == "McPAS-TCR" & full$Redundant == "Unique"), ]), 
+                                                           nrow(full[(full$Source == "VDJdb" & full$Redundant == "Unique"), ])),
+                                "Redundant.binding.pairs" = c(nrow(full[(full$Source == "ImmuneCODE" & full$Redundant == "Redundant"), ]), 
+                                                              nrow(full[(full$Source == "McPAS-TCR" & full$Redundant == "Redundant"), ]), 
+                                                              nrow(full[(full$Source == "VDJdb" & full$Redundant == "Redundant"), ])),
+                                "Unique.CDR3.sequences" = c(nrow(full[(full$Source == "ImmuneCODE" & full$RedundantTCR == "Unique"), ]),
+                                                           nrow(full[(full$Source == "McPAS-TCR" & full$RedundantTCR == "Unique"), ]), 
+                                                           nrow(full[(full$Source == "VDJdb" & full$RedundantTCR == "Unique"), ])),
+                                "Redundant.CDR3.sequences" = c(nrow(full[(full$Source == "ImmuneCODE" & full$RedundantTCR == "Redundant"), ]), 
+                                                              nrow(full[(full$Source == "McPAS-TCR" & full$RedundantTCR == "Redundant"), ]), 
+                                                              nrow(full[(full$Source == "VDJdb" & full$RedundantTCR == "Redundant"), ])))
+
+all.samples.count
+
+# Get counts
+# Unique binding pairs from ImmuneCODE 
+agg.avail.counts <- data.frame("ImmuneCODE", 
+                               count(full[(full$Redundant == "Unique" & full$Source == "ImmuneCODE"), ], Availability, name = "Binding.pairs"), 
+                               count(full[(full$RedundantTCR == "Unique" & full$Source == "ImmuneCODE"), ], Availability, name = "TCR.bioidentities")[2])
+colnames(agg.avail.counts)[1] <- "Source"
+
+# Redundant binding pairs 
+temp <- data.frame("Multiple sources", 
+                   count(full[full$Redundant == "Redundant", ], Availability, name = "Binding.pairs"), 
+                   count(full[full$RedundantTCR == "Redundant", ], Availability, name = "TCR.bioidentities")[2])
+colnames(temp)[1] <- "Source"
+agg.avail.counts <- rbind(agg.avail.counts, temp)
+
+# Unique binding pairs from McPAS-TCR 
+temp <- data.frame("McPAS-TCR", 
+                   count(full[(full$Redundant == "Unique" & full$Source == "McPAS-TCR"), ], Availability, name = "Binding.pairs"), 
+                   count(full[(full$RedundantTCR == "Unique" & full$Source == "McPAS-TCR"), ], Availability, name = "TCR.bioidentities")[2])
+colnames(temp)[1] <- "Source"
+agg.avail.counts <- rbind(agg.avail.counts, temp)
+
+# Unique binding pairs from VDJdb
+temp <- data.frame("VDJdb", 
+                   count(full[(full$Redundant == "Unique" & full$Source == "VDJdb"), ], Availability, name = "Binding.pairs"), 
+                   count(full[(full$RedundantTCR == "Unique" & full$Source == "VDJdb"), ], Availability, name = "TCR.bioidentities")[2])
+colnames(temp)[1] <- "Source"
+agg.avail.counts <- rbind(agg.avail.counts, temp)
+
+agg.avail.counts
+
+```
+
+#### Dataset contributions and redundancy
+
+``` {r agg-redundancy, echo=TRUE}
+
+# Aggregated dataset analysis
+ggplot(full, aes(x=Source)) +
+  coord_flip() +
+  geom_bar(stat="count", aes(fill=factor(Redundant))) + 
+  scale_fill_brewer(palette = "Pastel1") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), legend.title=element_blank()) + 
+  labs(title="Contributions of each dataset to the overall number of TCR binding hits",
+        x ="Dataset", y = "Total binding pairs") 
+
+
+```
+
+#### Overall availability of race information, by binding pairs
+
+``` {r agg-avail-binding-pairs, echo=TRUE, fig.show="hold", out.width="50%"}
+
+# Distribution of samples with/without ethnicity/race data
+ggplot(agg.avail.counts, aes(x= Availability, y= Binding.pairs, fill=Source)) +
+  geom_bar(position = "stack", stat = "identity") + 
+  scale_fill_brewer(palette = "Pastel1") +
+  ggtitle("Availability of race information in sampled datasets, by unique binding pairs") +
+  geom_text(size = 3, position = position_stack(vjust = 0.5), label=agg.avail.counts$Binding.pairs)
+
+ggplot(full[full$Redundant =="Unique", ], aes(x="", fill=Availability)) +
+  geom_bar(stat="count", width=1, color="white") +
+  coord_polar("y", start=0) +
+  scale_fill_brewer(palette = "Pastel1") +
+  theme_void() + ggtitle("Availability of race information in sampled datasets, by unique binding pairs") +
+  theme(legend.title=element_blank()) 
+
+```
+
+#### Overall availability of race information, by unique CDR3 sequences
+
+``` {r agg-avail-tcrs, echo=TRUE, fig.show="hold", out.width="50%"}
+
+# Distribution of samples with/without ethnicity/race data
+# get label locations
+ggplot(agg.avail.counts, aes(x= Availability, y= TCR.bioidentities, fill=Source)) +
+  geom_bar(position = "stack", stat = "identity") + 
+  ggtitle("Availability of race information in sampled datasets, by unique CDR3 sequences") +
+  geom_text(size = 3, position = position_stack(vjust = 0.5), label=agg.avail.counts$TCR.bioidentities)
+
+ggplot(full[full$RedundantTCR =="Unique", ], aes(x="", fill=Availability)) +
+  geom_bar(stat="count", width=1, color="white") +
+  coord_polar("y", start=0) +
+  theme_void() + ggtitle("Availability of race information in sampled datasets, by unique CDR3 sequences") +
+  theme(legend.title=element_blank())
+
+
+```
