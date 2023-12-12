@@ -15,7 +15,7 @@ T cells are key moderators of the adaptive immune system which utilize unique an
 
 
 ## Implementation
-This GitHub includes all code used to generate the results of the indicated analysis, which can be found in [this R markdown file](https://github.com/maiabennett/senior-capstone/blob/main/senior-capstone.Rmd). Any extraneous questions on implementation and use can also be directed to Maia Bennett-Boehm at maiabennett@unomaha.edu. 
+This GitHub includes all code used to generate the results of the indicated analysis, which can be found in [this R markdown file](https://github.com/maiabennett/tcr-diversity/blob/main/basic-analysis.Rmd). Any extraneous questions on implementation and use can also be directed to Maia Bennett-Boehm at maiabennett@unomaha.edu. 
 
 ## License
 This repository uses the GNU License. 
